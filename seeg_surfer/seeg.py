@@ -114,7 +114,7 @@ def create_balls(impl, log=True):
         u /= np.linalg.norm(u)
         # contacts are 2mm long, 1.5mm spaced
         dr = 2.0 + 1.5
-        r = np.r_[:ncont] * dr
+        r = np.array([c.index for c in elec.contacts]) * dr
         # handle bipolar / monopolar correctly
         bip = [c.bipolar for c in elec.contacts]
         if all(bip):
@@ -124,14 +124,17 @@ def create_balls(impl, log=True):
             raise NotImplementedError(msg)
         # positions
         pos = elec.target + u * r[:, np.newaxis]
-        # colors
+        # colors 
         color = np.zeros((ncont, 4))
-        color[:, 0] = elei
-        color[:, 2] = 1.0 - elei
+        color[:, 0] = elei*0.8
+        color[:, 1] = 0.2
+        color[:, 2] = (1.0 - elei)*0.8
         color[:, 3] = 1.0
         # sizes
-        size = 3 + (3 * elei).astype(int)
+        size = 2 + (elei).astype(int)
         # add item
         ball_items.append(gl.GLScatterPlotItem(
-            pos=pos, color=color, size=size, pxMode=False))
+            pos=pos, color=color, size=size, pxMode=False, glOptions='additive'))
+        ball_items.append(gl.GLScatterPlotItem(
+            pos=pos, color=color, size=size, pxMode=False, glOptions='translucent'))
     return ball_items

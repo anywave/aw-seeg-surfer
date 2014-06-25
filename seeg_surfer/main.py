@@ -12,13 +12,16 @@ def create_main_window():
     lay = pg.QtGui.QVBoxLayout()
     win.setLayout(lay)
 
+    # TODO read & setup all data items here
+
     # visualization
     gvw = GLView()
     lay.addWidget(gvw)
     gvw.setCameraPosition(distance=200)
-    for item in [mL, mR] + create_balls(impl):
-        item.translate(*(-O))
-        item.rotate(160, 1.0, 0.0, 0.0)
+    for item in [mL, mR] + create_balls(impl) + locballs:
+        item.scale(1.0, -1.0, 1.0)
+        item.translate(-O[0], O[1], -O[2])
+        item.rotate(200, 1.0, 0.0, 0.0)
         gvw.addItem(item)
 
     # button container
@@ -27,9 +30,9 @@ def create_main_window():
 
     # screen shot
     def take_shot():
-        f = pg.QtGui.QFileDialog.getSaveFileName
-        path, _ = f(caption='Save screenshot (PNG Image)',
-                    filter='PNG Image (*.png)')
+        path = util.ask_for_filename(caption='Save screenshot (PNG Image)',
+                                     filter='PNG Image (*.png)',
+                                     mode='save')
         gvw.grabFrameBuffer().save(path)
     b_capt = pg.QtGui.QPushButton('Screenshot')
     b_capt.clicked.connect(take_shot)
@@ -71,6 +74,7 @@ def create_main_window():
                 vec = pg.QtGui.QVector3D(*elec.entry)
                 v = mL.mapToView(vec)
                 gvw.texts.append((v.x(), v.y(), v.z(), elec.region, font))
+            gvw.repaint()
     b_labels = pg.QtGui.QPushButton('Show labels')
     lay_ctrl.addWidget(b_labels)
     b_labels.clicked.connect(toggle_labels)
@@ -89,18 +93,17 @@ def create_main_window():
     b_value_table = pg.QtGui.QPushButton('Table of values')
     lay_ctrl.addWidget(b_value_table)
     b_value_table.clicked.connect(show_values)
-    # gif
 
+    # gif
     def make_gif():
         f = pg.QtGui.QFileDialog.getSaveFileName
-        path = f(caption='Save movie (GIF Animation)',
+        path = f(caption='Save movie (GIF Animation)', 
                  filter='GIF Image (*.gif)')
         try:
             path, _ = path
         except:
             pass
         try:
-            import gif
             import cStringIO
             import PIL
         except Exception as exc:
@@ -113,13 +116,12 @@ def create_main_window():
         pd.setModal(True)
         pd.setLabelText("Generating movie...")
         pd.show()
-        pd.setMaximum(2 * 360)
+        pd.setMaximum(2*360)
         is_canceled = [False]
-
         def cancel():
             is_canceled[0] = True
         pd.canceled.connect(cancel)
-        for i in range(2 * 360):
+        for i in range(2*360):
             if is_canceled[0]:
                 break
             img = gvw.grabFrameBuffer()
@@ -130,7 +132,7 @@ def create_main_window():
             sio.write(buff.data())
             buff.close()
             sio.seek(0)
-            # images.append(PIL.Image.open(sio))
+            #images.append(PIL.Image.open(sio))
             ary_im = np.array(PIL.Image.open(sio))
             print ary_im.shape
             if ary_im.shape[0] % 2:
@@ -141,14 +143,11 @@ def create_main_window():
             gvw.orbit(0.5, 0)
             pd.setValue(i)
             app.processEvents()
-        """
-        if not is_canceled[0]:
-            gif.writeGif('spin.gif', images, duration=0.05, dither=5)
-        """
         pd.close()
     b_gif = pg.QtGui.QPushButton('Make GIF')
     lay_ctrl.addWidget(b_gif)
     b_gif.clicked.connect(make_gif)
+
     win.show()
 
 
@@ -173,3 +172,19 @@ def parse_data():
         msg.showMessage("Unable to read data files:\n\n%r" % (exc,))
         app.exec_()
         sys.exit()
+    locballs = []
+    try:
+        # QString doesn't have same methods as Python string
+        py_str_fname = str(basename + '_loc.txt')
+        locs = np.loadtxt(py_str_fname)
+        if locs.ndim == 1:
+            locs = locs.reshape((1, -1))
+        for x, y, z, r, g, b, sz in locs:
+            locballs.append(gl.GLScatterPlotItem(
+                pos=np.r_[x,y,z], color=np.r_[r,g,b], size=sz))
+    except Exception as exc:
+        import sys, traceback
+        _, _, tb = sys.exc_info()
+        traceback.print_tb(tb)
+        print exc
+    return O, L, R, impl, locballs

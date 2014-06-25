@@ -4,10 +4,10 @@ from nibabel.gifti import giftiio
 
 class GiiSurface(object):
 
-    def __init__(self, filename):
+    def __init__(self, filename, xyz_order=[1, 0, 2]):
         self.obj = giftiio.read(filename)
         self.vert, self.face = [a.data for a in self.obj.darrays]
-        self.face = self.face[:, [1, 0, 2]]
+        self.face = self.face[:, xyz_order]
         self.mesh_data = gl.MeshData(vertexes=self.vert, faces=self.face)
 
     @property
@@ -27,4 +27,4 @@ def create_mesh_items():
              'glOptions': 'opaque',
              'smooth': True,
              'color': (0.7, 0.7, 0.7, 1.0)}
-    mL, mR = [gl.GLMeshItem(meshdata=S.mesh_data, **glopt) for S in (L, R)]
+    return [gl.GLMeshItem(meshdata=S.mesh_data, **glopt) for S in (L, R)]
