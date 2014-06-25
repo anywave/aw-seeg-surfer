@@ -1,6 +1,40 @@
 
 import pyqtgraph as pg
+from pyqtgraph import QtGui, QtCore
 from . import surface, seeg, widgets
+
+"""
+Menus
+
+- file
+    - surface
+        - load
+        - remove
+    - seeg implantation
+        - load from txt, xlsx
+        - apply colors (txt, xlsx)
+    - localization
+        - load points from txt, xlsx
+        - load volume from mat
+    - export screenshot
+    - export film 360 / 180 
+- edit
+    - implantation
+    - localization
+- view
+    - swap left/right
+    - labels on / off
+    - surface color
+    - single view
+    - three isometric views
+
+Eventually, edit implantation, create segmentation/positions from MRI. Mapping with AnyWave.
+Dynamic colors over time, show time series.
+
+"""
+
+class MainWindow(QtGui.QMainWindow):
+    "Menus, status and main view"
 
 
 def create_main_window():
