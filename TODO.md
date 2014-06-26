@@ -30,3 +30,13 @@
 - dynamique valeurs contacte, 
 - topographie par isocontour
 
+
+## other
+
+- switch to wireframe rendering
+- black on white background
+- use mixed Qt/GL scene in order to place all elements in same space
+  incl. colorbars, suppl info, etc
+- slices from MRI with boxes, etc. 
+
+
