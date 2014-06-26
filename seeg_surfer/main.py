@@ -5,15 +5,13 @@ import pprint
 import tempfile
 import cStringIO
 
-
 import numpy as np
 import pyqtgraph as pg
-from pyqtgraph.opengl import GLViewWidget
+from pyqtgraph import opengl as gl
 from pyqtgraph import QtGui, QtCore
 from nibabel.gifti import giftiio
+import openpyxl
 import PIL
-
-from . import surface, seeg, widgets
 
 
 class Config(QtCore.QSettings):
@@ -44,198 +42,115 @@ class TempDir(object):
         shutil.rmtree(self.dirname)
 
 
-class UserCancel(Exception):
-    pass
-
-
 def ask_for_filename(caption='', filter='', path='', mode='open'):
+    mode_map = {
+        'open': 'getOpenFileName',
+        'opens': 'getOpenFileNames',
+        'save': 'getSaveFileName',
+        'dir': 'getExistingDirectory'
+        }
+    if mode not in mode_map:
+        fmt = "received mode=%r, expected one of %r"
+        content = mode, mode_map.keys()
+        raise ValueError(fmt % content)
     cfg = Config('INS', 'sEEG Surfer')
     path = path or cfg['last-path']
     if len(path) == 0:
         path = os.path.expanduser('~/')
-    dlg = getattr(QtGui, 'get%sFileName' % (mode.title(), ))
-    path = dlg(caption=caption, filter=filter, dir=path)
-    try:
-        path, _ = path
-    except:
-        pass
+    dlg = getattr(QtGui.QFileDialog, mode_map[mode])
+    kwds = {'caption': caption, 'directory': path}
+    if not mode == 'dir':
+        kwds['filter'] = filter
+    path = dlg(**kwds)
+    if mode == 'opens':
+        path = map(unicode, path)
+    else:
+        path = unicode(path)
     if path:
-        cfg['last-path'] = os.path.dirname(path)
+        cfg['last-path'] = path[0] if mode == 'opens' else path
         return path
     else:
-        raise UserCancel()
+        raise RuntimeError('User canceled')
 
 
-def ask_for_gii():
-    path = ask_for_filename('Open surface', 'Gifti surfaces (*.gii)')
-    parts = giifile.split('.gii')[0].split('_')
-    basename = '_'.join(parts[:-1])
-    # first letter is L or R, we don't care
-    giitype = parts[-1][1:]
-    return basename, giitype
+def xl_find_cell(wb, value, ignore_case=True, test_in=True):
+    hits = []
+    value = unicode(value)
+    if ignore_case:
+        value = value.lower()
+    for sheet in wb.worksheets:
+        for row in sheet.rows:
+            for cell in row:
+                cval = cell.value
+                if isinstance(cval, unicode) and ignore_case:
+                    cval = cval.lower()
+                    ok = value in cval if test_in else value == cval
+                else:
+                    ok = value == cval
+                if ok:
+                    hits.append(cell)
+    return hits
 
 
-class GiiSurface(object):
-
-    def __init__(self, filename, xyz_order=[1, 0, 2]):
-        self.obj = giftiio.read(filename)
-        self.vert, self.face = [a.data for a in self.obj.darrays]
-        self.face = self.face[:, xyz_order]
-        self.mesh_data = gl.MeshData(vertexes=self.vert, faces=self.face)
-
-    @property
-    def center(self):
-        return self.vert.mean(axis=0)
-
-
-def setup_hemispheres(basename, post='white', **glopt):
-    L = GiiSurface(basename + '_L%s.gii' % post)
-    R = GiiSurface(basename + '_R%s.gii' % post)
-    O = (L.center + R.center) / 2
-    return O, L, R
-
-
-def create_mesh_items():
-    glopt = {'shader': 'shaded',
-             'glOptions': 'opaque',
-             'smooth': True,
-             'color': (0.7, 0.7, 0.7, 1.0)}
-    return [gl.GLMeshItem(meshdata=S.mesh_data, **glopt) for S in (L, R)]
-
-
-def parse_label(label):
-    reg, num = re.match("([A-Za-z']+)(\d+)", label).groups()
-    num = int(num)
-    return reg, num
-
-
-class Contact(object):
-
-    def __init__(self, label, **info):
-        self.label = label
-        self.bipolar = '-' in label
-        if self.bipolar:
-            l1, l2 = label.split('-')
-            self.region, self.index = parse_label(l1)
-            _, self.index_ref = parse_label(l2)
+def xl_find_rect(origin):
+    # get sheet & row for origin
+    sheet = origin.parent
+    row = origin.row
+    # determine value columns
+    row = sheet.rows[origin.row - 1]
+    found_origin = False
+    value_columns = []
+    clo, chi = 0, 0
+    for i, c in enumerate(row):
+        if found_origin:
+            val = c.value
+            if val is None:
+                chi = i
+                break
+            else:
+                value_columns.append(val)
+        elif c.coordinate == origin.coordinate:
+            found_origin = True
+            clo = i
         else:
-            self.region, self.index = parse_label(label)
-        for k, v in info.items():
-            setattr(self, k, v)
-
-    def __repr__(self):
-        fmt = "<Contact %s%s>"
-        idx = "{0.index}-{0.index_ref}" if self.bipolar else "{0.index}"
-        fmt %= self.region, idx.format(self)
-        return fmt
-
-
-class Electrode(object):
-
-    def __init__(self, contacts, oblique=False, **info):
-        self.region = contacts[0].region
-        self.contacts = contacts
-        for k, v in info.items():
-            setattr(self, k, v)
-        self.oblique = oblique
-        self.ncont = max(
-            c.index_ref if c.bipolar else c.index
-            for c in contacts)
-
-    def __repr__(self):
-        fmt = "<Electrode %05s %02s contacts>"
-        fmt %= self.region, self.ncont
-        return fmt
-
-    def __getitem__(self, key):
-        if hasattr(self, key):
-            return getattr(self, key)
-        elif all(hasattr(c, key) for c in self.contacts):
-            return np.array([getattr(c, key) for c in self.contacts])
+            pass
+    # determine rows
+    rhi = 0
+    for i in xrange(origin.row, sheet.get_highest_row() + 1):
+        idx = origin.column + str(i)
+        val = sheet[idx].value
+        if val is None:
+            break
+        rhi = i
+    # return rectangle
+    return [row[clo:chi] for row in sheet.rows[origin.row - 1:rhi]]
 
 
-class Implantation(dict):
-
-    def __init__(self, electrodes):
-        self.electrodes = electrodes
-        for elec in self.electrodes:
-            self[elec.region] = elec
-
-    def __repr__(self):
-        return pprint.pformat(self.electrodes)
-
-
-def parse_ei_txt(filename):
-    with open(filename) as fd:
-        ei_lines = fd.readlines()
-    electrodes = []
-    contacts = []
-    for line in ei_lines:
-        if line.startswith('-'):
-            electrodes.append(Electrode(contacts))
-            contacts = []
-            continue
-        label, ei = line.split('\t')
-        ei = float(ei.strip())
-        contacts.append(Contact(label, ei=ei))
-    electrodes.append(Electrode(contacts))
-    return Implantation(electrodes)
+def xl_get(fname, *origins):
+    wb = openpyxl.load_workbook(fname)
+    rects = []
+    for origin in origins:
+        try:
+            rect = xl_find_rect(xl_find_cell(wb, origin)[0])
+            rects.append([[c.value for c in r] for r in rect])
+        except:
+            print "couldn't find ", origin
+    return rects
 
 
-def parse_locations(impl, fname):
-    with open(fname) as fd:
-        for l in fd.readlines():
-            l = l.strip()
-            if l and not l.startswith('#'):
-                parts = l.split('\t')
-                r = parts[0].strip()
-                n = int(parts[1])
-                tx, ty, tz, ix, iy, iz = map(float, parts[2:])
-                if r not in impl:
-                    if r[-1] == 'p':
-                        r = r[:-1] + "'"
-                elec = impl[r]
-                elec.target = np.array([tx, ty, tz])
-                elec.entry = np.array([ix, iy, iz])
-                elec.oblique = abs(tz - iz) > abs(tx - ix)
-
-
-def create_balls(impl, log=True):
-    ball_items = []
-    eis = np.concatenate([e['ei'] for e in impl.values()])
-    eimin, eimax = np.percentile(eis, [5, 95])
-    for name, elec in impl.items():
-        ncont = len(elec.contacts)
-        elei = (elec['ei'] - eimin) / eimax
-        # normal direction from target to entry
-        u = elec.entry - elec.target
-        u /= np.linalg.norm(u)
-        # contacts are 2mm long, 1.5mm spaced
-        dr = 2.0 + 1.5
-        r = np.array([c.index for c in elec.contacts]) * dr
-        # handle bipolar / monopolar correctly
-        bip = [c.bipolar for c in elec.contacts]
-        if all(bip):
-            r += dr / 2.0
-        elif any(bip):
-            msg = 'mixed mono & bipolar electrodes not implemented'
-            raise NotImplementedError(msg)
-        # positions
-        pos = elec.target + u * r[:, np.newaxis]
-        # colors
-        color = np.zeros((ncont, 4))
-        color[:, 0] = elei * 0.8
-        color[:, 1] = 0.2
-        color[:, 2] = (1.0 - elei) * 0.8
-        color[:, 3] = 1.0
-        # sizes
-        size = 2 + (elei).astype(int)
-        # add item
-        ball_items.append(gl.GLScatterPlotItem(
-            pos=pos, color=color, size=size, pxMode=False, glOptions='additive'))
-        ball_items.append(gl.GLScatterPlotItem(
-            pos=pos, color=color, size=size, pxMode=False, glOptions='translucent'))
-    return ball_items
+def parse_seeg_label(label):
+    match = lambda l: re.match("([A-Za-z']+)(\d+)", l).groups()
+    bipolar = '-' in label
+    if bipolar:
+        l1, l2 = label.split('-')
+        region, index = match(l1)
+        _, index_ref = match(l2)
+    else:
+        region, index = match(label)
+        index_ref = None
+    if region.endswith("'"):
+        region = region[:-1] + "p"
+    return region, int(index), int(index_ref) if index_ref else None
 
 
 def save_frame(self, fb, fname):
@@ -278,33 +193,6 @@ class SceneAdjustor(QtGui.QWidget):
         QtGui.QWidget.__init__(self, parent=parent)
         self.scene = scene
         lay = QtGui.QVBoxLayout()
-
-
-class Scene(GLViewWidget):
-
-    def __init__(self, *args, **kwds):
-        GLViewWidget.__init__(self, *args, **kwds)
-        self.texts = []
-
-    def paintGL(self):
-        super(GLView, self).paintGL()
-        white = pg.QtGui.QColor(255, 255, 255)
-        black = pg.QtGui.QColor(0, 0, 0)
-        for x, y, z, text, font in self.texts:
-            self.qglColor(black)
-            self.renderText(x + 0.5, y + 0.5, z + 0.5, text, font)
-            self.qglColor(black)
-            self.renderText(x - 0.5, y - 0.5, z - 0.5, text, font)
-            self.qglColor(white)
-            self.renderText(x, y, z, text, font)
-
-    def setup(self, items):
-        self.setCameraPosition(distance=200)
-        for item in [mL, mR] + create_balls(impl) + locballs:
-            item.scale(1.0, -1.0, 1.0)
-            item.translate(-O[0], O[1], -O[2])
-            item.rotate(200, 1.0, 0.0, 0.0)
-            self.addItem(item)
 
 
 class MainWindow(QtGui.QMainWindow):
@@ -375,15 +263,10 @@ class MainWindow(QtGui.QMainWindow):
     def swap_left_right():
         pass
 
-    def labels_on_off():
-        if gvw.texts:
-            del gvw.texts[:]
-            b_labels.setText('Show labels')
-        else:
-            b_labels.setText('Remove labels')
-            font = pg.QtGui.QFont()
-            font.setWeight(75)
-            font.setPointSize(18)
+    def labels_on_off(self):
+        _ = not self.scene.render_labels
+        self.a_labels_on_off.setChecked(_)
+        self.scene.render_labels = _
             for elec in impl.electrodes:
                 vec = pg.QtGui.QVector3D(*elec.entry)
                 v = mL.mapToView(vec)
@@ -456,3 +339,264 @@ def parse_data():
         traceback.print_tb(tb)
         print exc
     return O, L, R, impl, locballs
+
+# create items for elements of scene graph
+
+# interesting methods on GLGraphicsItem: hide/show, update, map{To, From}View
+
+
+class ColorSizeMap(object):
+    "For a value, generate a color (RGBA) and size"
+    maps = {
+        'default': (
+            np.r_[0.0, 1.0],
+            np.array([[0.0, 0.0, 1.0, 1.0],
+                      [1.0, 0.0, 0.0, 1.0]]),
+            np.r_[0, 50]
+            ),
+        'rb': (
+            np.r_[0.0, 1.0],
+            np.array([[0.0, 0.0, 1.0, 1.0],
+                      [1.0, 0.0, 0.0, 1.0]]),
+            None
+            ),
+        'sz': (
+            np.r_[0.0, 1.0],
+            None,
+            np.r_[0, 50]
+            ),
+    }
+
+    def __init__(self, map='default', log=False, logeps=-1):
+        self.map = self.maps.get(map, map)
+        self.log = log
+        self.logeps = logeps
+
+    def __call__(self, vals):
+        vals = vals.astype(np.float32)
+        vmin = vals.min()
+        vptp = vals.ptp()
+        if self.log:
+            vals += vmin*10**self.logeps
+            vals = np.log(vals)
+        vals = (vals - vmin)/vptp
+        v, c, sz = self.map
+        if sz is not None:
+            size = np.interp(vals, v, sz).astype(sz.dtype)
+        else:
+            size = None
+        if c is not None:
+            color = np.empty(vals.shape + (4,), np.float32)
+            for i in xrange(4):
+                color[..., i] = np.interp(vals, v, c[:, i])
+        else:
+            color = None
+        return color, size
+
+
+class ColorSizeMultiMap(object):
+
+    def __init__(self, maps, mode='add'):
+        self.maps = []
+        for map in maps:
+            if not isinstance(map, ColorSizeMap):
+                map = ColorSizeMap(map)
+            self.maps.append(map)
+        self.mode = mode
+        if mode not in ('add',):
+            raise ValueError('mode not supported: %r', mode)
+
+    def __call__(self, *vals):
+        colors = []
+        sizes = []
+        for map, val in zip(self.maps, vals):
+            color, size = map(val)
+            if color is not None:
+                colors.append(color)
+            if size is not None:
+                sizes.append(size)
+        colors = np.array(colors).mean(axis=0)
+        sizes = np.array(sizes).mean(axis=0)
+        return colors, sizes
+
+
+class ColorSizeMapsView(object):
+    "Registry of color/size mappings"
+    def add_map(self, name, map):
+        pass
+
+
+class sEEG(gl.GLScatterPlotItem):
+    # options: pxMode, color/size mapping
+
+    def __init__(self):
+        gl.GLScatterPlotItem.__init__(self)
+        self.electrodes = {}
+        self.montage = {}
+
+    def paint(self):
+        self.setGLOptions('additive')
+        gl.GLScatterPlotItem.paint(self)
+        self.setGLOptions('translucent')
+        gl.GLScatterPlotItem.paint(self)
+
+    def add_electrode(self, *args):
+        if len(args) == 1 and len(args[0]) == 7:
+            args = args[0]
+        name, tx, ty, tz, ix, iy, iz = args
+        if name.endswith("'"):
+            name = name[:-1] + "p"
+        self.electrodes[name] = {
+            'target': np.array([tx, ty, tz], np.float32),
+            'entry': np.array([ix, iy, iz], np.float32),
+            'oblique': np.abs(tz - iz) > np.abs(tx - ix)
+        }
+
+    def update_pos(self):
+        self.setData(pos=self.contact_pos)
+
+    def update_color_size(self):
+        values = []
+        for measure in self.mapped_measures:
+            values.append(self.montage['measures'][measure])
+        color, size = self.csmap(*values)
+        self.setData(color=color, size=size)
+
+    @classmethod
+    def from_xls(cls, fname):
+        self = cls()
+        elec, mont = xl_get(fname, 'electrodes', 'montage')
+        # setup electrodes
+        map(self.add_electrode, elec[1:])
+        # setup montage
+        self.montage['contacts'] = [r[0] for r in mont[1:]]
+        self.montage['measures'] = {}
+        for i, name in enumerate(mont[0][1:]):
+            values = [r[i + 1] for r in mont[1:]]
+            self.montage['measures'][name] = np.array(values)
+        self.update_pos()
+        self.csmap = ColorSizeMultiMap(('default',))
+        self.mapped_measures = [mont[0][1]]
+        self.update_color_size()
+        return self
+
+    @property
+    def contact_pos(self):
+        pos = []
+        for contact in seeg.montage['contacts']:
+            reg, ix, ixrf = parse_seeg_label(contact)
+            i, t = [seeg.electrodes[reg][k] for k in 'entry target'.split()]
+            u = i - t
+            u /= np.linalg.norm(u)
+            # contacts are 2.0 mm long, spaced at 1.5 mm
+            dr = 2.0 + 1.5
+            if ixrf is None:                # monopolar
+                r = dr * ix
+            else:                           # bipolar, ixrf > ix
+                r = dr * (ixrf - ix) / 2.0
+            pos.append(t + u * r)
+        return np.vstack(pos)
+
+
+class PointLocalization(gl.GLScatterPlotItem):
+    @classmethod
+    def from_xls(cls, fname, key):
+        self = cls()
+        rows, = xl_get(fname, key)
+        self.loc_name, _, _, _ = rows[0]
+        vxyz = np.array(rows[1:])
+        self.loc_values = vxyz[:, 0]
+        self.loc_xyz = vxyz[:, 1:]
+        self.loc_csmap = ColorSizeMap('default')
+        self.update_data()
+        return self
+    def update_data(self):
+        color, size = self.loc_csmap(self.loc_values)
+        self.setData(pos=self.loc_xyz, color=color, size=size)
+
+
+def cortical_mesh_items(fname, xyz=[1, 0, 2]):
+    glopt = {'shader': 'shaded',
+             'glOptions': 'opaque',
+             'smooth': True,
+             'color': (0.7, 0.7, 0.7, 1.0)}
+    parts = fname.split('_')
+    bname = '_'.join(parts[:-1])
+    gtype = parts[-1].split('.gii')[0][1:]
+    items = []
+    centers = []
+    for hemi in 'LR':
+        gii = giftiio.read('%s_%s%s.gii' % (bname, hemi, gtype))
+        vert, face = [a.data for a in gii.darrays]
+        print vert.shape, face.shape
+        items.append(gl.GLMeshItem(vertexes=vert, face=face[:, xyz], **glopt))
+        centers.append(vert.mean(axis=0))
+    center = (centers[0] + centers[1]) / 2.0
+    return center, items
+
+
+class Scene(gl.GLViewWidget):
+    # options: label font
+    # TODO setup for mixed qt/gl rendering e.g. colorbar
+    def __init__(self, *args, **kwds):
+        gl.GLViewWidget.__init__(self, *args, **kwds)
+        self.labels = []
+        self.label_font = QtGui.QFont()
+        self.label_font.setWeight(75)
+        self.label_font.setPointSize(18)
+        self.label_offset = 0.5
+        self.label_fg_color = QtGui.QColor(255, 255, 255)
+        self.label_bg_color = QtGui.QColor(0, 0, 0)
+        self.render_labels = False
+    def paintGL(self):
+        gl.GLViewWidget.paintGL(self)
+        if self.render_labels:
+            fg, bg = self.label_fg_color, self.label_bg_color
+            font, os = self.label_font, self.label_offset
+            for x, y, z, text in self.labels:
+                self.qglColor(bg)
+                self.renderText(x + os, y + os, z + os, text, font)
+                self.qglColor(bg)
+                self.renderText(x - os, y - os, z - os, text, font)
+                self.qglColor(fg)
+                self.renderText(x, y, z, text, font)
+    def setup(self, items):
+        self.setCameraPosition(distance=200)
+        for item in [mL, mR] + create_balls(impl) + locballs:
+            item.scale(1.0, -1.0, 1.0)
+            item.translate(-O[0], O[1], -O[2])
+            item.rotate(200, 1.0, 0.0, 0.0)
+            self.addItem(item)
+
+seeg = sEEG.from_xls('test.xlsx')
+sc.addItem(seeg)
+pl = PointLocalization.from_xls('test.xlsx', 'lcmv')
+sc.addItem(pl)
+
+sc = Scene()
+sc.show()
+cs, items = cortical_mesh_items('work/loe/LOE_Lwhite.gii')
+[sc.addItem(i) for i in items]
+
+print cm.l_mesh.vertexes
+
+cm.l_mesh.opts['meshdata'].faceNormals()
+
+
+sc = Scene()
+xg = gl.GLGridItem()
+yg = gl.GLGridItem()
+zg = gl.GLGridItem()
+xg.rotate(90, 0, 1, 0)
+yg.rotate(90, 1, 0, 0)
+xg.translate(-10, 0, 0)
+yg.translate(0, -10, 0)
+zg.translate(0, 0, -10)
+[sc.addItem(g) for g in (xg, yg, zg)]
+sc.show()
+
+
+sci = gl.GLScatterPlotItem(pos=np.random.randn(50, 3), color=np.random.rand(50, 4), size=5)
+
+sc.addItem(sci)
+
